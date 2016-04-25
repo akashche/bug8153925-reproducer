@@ -17,18 +17,20 @@
  *
  */
 
-import java.io.File;
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchService;
 
 /**
  * @test
  * @bug 8153925
- * @requires os.family == "windows"
  * @summary repeatedly registers a WatchService for the directory and
  *          then deletes this directory recursively to reproduce the situation
  *          when, due to windows-specific FS locking behaviour, ReadDirectoryChangesW
@@ -41,23 +43,23 @@ public class GetOverlappedResultHangsTest {
     private static final int ITERATIONS_COUNT = 1024;
 
     public static void main(String[] args) throws Exception {
-        File dir = Files.createTempDirectory(GetOverlappedResultHangsTest.class.getName()).toFile();
+        Path dir = Files.createTempDirectory(GetOverlappedResultHangsTest.class.getName());
         int accessDeniedCount = 0;
         for(int i = 0; i < ITERATIONS_COUNT; i++) {
             System.out.println("Iteration: [" + i + "] of [" + ITERATIONS_COUNT + "]");
             boolean accessDenied = false;
             WatchService watcher = FileSystems.getDefault().newWatchService();
             try {
-                dir.mkdirs();
-                dir.toPath().register(watcher, StandardWatchEventKinds.ENTRY_CREATE,
+                Files.createDirectories(dir);
+                dir.register(watcher, StandardWatchEventKinds.ENTRY_CREATE,
                         StandardWatchEventKinds.ENTRY_DELETE, StandardWatchEventKinds.ENTRY_MODIFY,
                         StandardWatchEventKinds.OVERFLOW);
                 modify(dir);
-            } catch (Exception e) {
-                if ("Access is denied".equals(e.getMessage())) {
-                    accessDenied = true;
-                    accessDeniedCount += 1;
-                }
+            } catch (AccessDeniedException e) {
+                accessDenied = true;
+                accessDeniedCount += 1;
+            } catch (Exception e) { 
+                // ignore
             } finally {
                 if (accessDenied && checkHangs()) {
                     // wait for some time and recheck that it is still hanging
@@ -71,31 +73,31 @@ public class GetOverlappedResultHangsTest {
                 watcher.close();
             }
         }
-        recursivelyDelete(dir);
-        if (accessDeniedCount > 0) {
-            System.out.println("Test passed: 'Access is denied' errors count: [" + accessDeniedCount + "]");
-        } else {
-            throw new RuntimeException("Test error: cannot reproduce 'Access is denied' error");
-        }
+        deleteRecursiveQuietly(dir);
+        System.out.println("Test passed (or reproduction failed): 'Access is denied' errors count: [" + accessDeniedCount + "]");
     }
 
-    public static void modify(File directory) throws Exception {
-        recursivelyDelete(directory);
-        File subdir = new File(directory, "subdir");
-        subdir.mkdirs();
-        File file = new File(subdir, "test");
-        file.createNewFile();
+    public static void modify(Path dir) throws Exception {
+        deleteRecursiveQuietly(dir);        
+        Path subdir = dir.resolve("subdir");
+        Files.createDirectories(subdir);
+        Path file = subdir.resolve("test");
+        Files.createFile(file);
     }
 
-    private static boolean recursivelyDelete(File file) {
-        boolean ok = true;
-        if (file.isDirectory()) {
-            for (File f : file.listFiles()) {
-                ok &= recursivelyDelete(f);
+    private static void deleteRecursiveQuietly(Path path) {
+        try {
+            if (Files.isDirectory(path)) {
+                try (DirectoryStream<Path> stream = Files.newDirectoryStream(path)) {
+                    for (Path pa : stream) {
+                        deleteRecursiveQuietly(pa);
+                    }
+                }
             }
+            Files.delete(path);
+        } catch (Exception e) {
+            // quiet
         }
-        ok &= file.delete();
-        return ok;
     }
 
     private static boolean checkHangs() {
