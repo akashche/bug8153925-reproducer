@@ -19,7 +19,6 @@
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
-import java.nio.file.AccessDeniedException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
@@ -27,62 +26,70 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * @test
  * @bug 8153925
- * @summary repeatedly registers a WatchService for the directory and
- *          then deletes this directory recursively to reproduce the situation
+ * @summary concurrently registers a WatchService for the directory and
+ *          deletes/re-creates this directory to reproduce the situation
  *          when, due to windows-specific FS locking behaviour, ReadDirectoryChangesW
  *          call in WindowsWatchService.Poller#run() will fail with 'Access is denied'.
  *          After that WindowsWatchService will try to wait on the non-existed
- *          overlapped I/O operation and will hang indefinitely locking the directory handle
+ *          overlapped I/O operation and will hang indefinitely locking the directory 
+ *          handle (test will hang in that case).
  */
 public class GetOverlappedResultHangsTest {
-
+    
     private static final int ITERATIONS_COUNT = 1024;
 
-    public static void main(String[] args) throws Exception {
-        Path dir = Files.createTempDirectory(GetOverlappedResultHangsTest.class.getName());
-        int accessDeniedCount = 0;
-        for(int i = 0; i < ITERATIONS_COUNT; i++) {
-            System.out.println("Iteration: [" + i + "] of [" + ITERATIONS_COUNT + "]");
-            boolean accessDenied = false;
-            WatchService watcher = FileSystems.getDefault().newWatchService();
-            try {
-                Files.createDirectories(dir);
+    public static void main(String[] args) throws Exception {        
+        ExecutorService pool = Executors.newCachedThreadPool();
+        Path dir = null;
+        try {
+            dir = Files.createTempDirectory("work");
+            dir.toFile().deleteOnExit();
+            final Path fdir = dir;
+            pool.submit(() -> openAndCloseWatcherWork(fdir));
+            pool.submit(() -> deleteAndRecreateDirectoryWork(fdir));
+            // pool.submit(() -> monitorHang());
+        } finally {
+            pool.shutdown();
+        }
+        
+        boolean exited = pool.awaitTermination(5L, TimeUnit.MINUTES);
+        deleteRecursiveQuietly(dir);
+        if (!exited) {
+            throw new RuntimeException("Thread pool did not terminate");
+        }        
+    }
+    
+    private static void openAndCloseWatcherWork(Path dir) {
+        for (int i = 0; i < ITERATIONS_COUNT; i++) {
+            try (WatchService watcher = FileSystems.getDefault().newWatchService()) {
                 dir.register(watcher, StandardWatchEventKinds.ENTRY_CREATE,
                         StandardWatchEventKinds.ENTRY_DELETE, StandardWatchEventKinds.ENTRY_MODIFY,
                         StandardWatchEventKinds.OVERFLOW);
-                modify(dir);
-            } catch (AccessDeniedException e) {
-                accessDenied = true;
-                accessDeniedCount += 1;
-            } catch (Exception e) { 
-                // ignore
-            } finally {
-                if (accessDenied && checkHangs()) {
-                    // wait for some time and recheck that it is still hanging
-                    sleep(1000);
-                    if (checkHangs()) {
-                        throw new RuntimeException("Test failed, poller thread hangs" +
-                                " on 'GetOverlappedResult' on iteration: [" + i + "]," +
-                                " 'Access is denied' errors count: [" + accessDeniedCount + "]");
-                    }
-                }
-                watcher.close();
+            } catch (Exception e) {
+                // quiet
             }
         }
-        deleteRecursiveQuietly(dir);
-        System.out.println("Test passed (or reproduction failed): 'Access is denied' errors count: [" + accessDeniedCount + "]");
     }
 
-    public static void modify(Path dir) throws Exception {
-        deleteRecursiveQuietly(dir);        
-        Path subdir = dir.resolve("subdir");
-        Files.createDirectories(subdir);
-        Path file = subdir.resolve("test");
-        Files.createFile(file);
+    private static void deleteAndRecreateDirectoryWork(Path dir) {
+        for (int i = 0; i < ITERATIONS_COUNT; i++) {
+            try {
+                deleteRecursiveQuietly(dir);        
+                Path subdir = dir.resolve("subdir");
+                Files.createDirectories(subdir);
+                Path file = subdir.resolve("test");
+                Files.createFile(file);
+            } catch (Exception e) {
+                // quiet
+            }
+        }
     }
 
     private static void deleteRecursiveQuietly(Path path) {
@@ -100,22 +107,18 @@ public class GetOverlappedResultHangsTest {
         }
     }
 
-    private static boolean checkHangs() {
-        for (ThreadInfo info : ManagementFactory.getThreadMXBean().dumpAllThreads(true, true)) {
-            for (StackTraceElement el : info.getStackTrace()) {
-                if ("GetOverlappedResult".equals(el.getMethodName())) {
-                    return true;
+    /*
+    private static void monitorHang() {
+        for (int i = 0; i < ITERATIONS_COUNT; i++) {
+            for (ThreadInfo info : ManagementFactory.getThreadMXBean().dumpAllThreads(true, true)) {
+                for (StackTraceElement el : info.getStackTrace()) {
+                    if ("GetOverlappedResult".equals(el.getMethodName())) {
+                        System.out.println("'GetOverlappedResult' is present in a stack trace," +
+                            " for a thread: [" + info.getThreadName() + "], iteration: [" + i + "]");
+                    }
                 }
             }
         }
-        return false;
     }
-
-    private static void sleep(long millis) {
-        try {
-            Thread.sleep(millis);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
-    }
+    */
 }
