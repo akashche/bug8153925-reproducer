@@ -54,7 +54,6 @@ public class GetOverlappedResultHangsTest {
             final Path fdir = dir;
             pool.submit(() -> openAndCloseWatcherWork(fdir));
             pool.submit(() -> deleteAndRecreateDirectoryWork(fdir));
-            // pool.submit(() -> monitorHang());
         } finally {
             pool.shutdown();
         }
@@ -106,19 +105,4 @@ public class GetOverlappedResultHangsTest {
             // quiet
         }
     }
-
-    /*
-    private static void monitorHang() {
-        for (int i = 0; i < ITERATIONS_COUNT; i++) {
-            for (ThreadInfo info : ManagementFactory.getThreadMXBean().dumpAllThreads(true, true)) {
-                for (StackTraceElement el : info.getStackTrace()) {
-                    if ("GetOverlappedResult".equals(el.getMethodName())) {
-                        System.out.println("'GetOverlappedResult' is present in a stack trace," +
-                            " for a thread: [" + info.getThreadName() + "], iteration: [" + i + "]");
-                    }
-                }
-            }
-        }
-    }
-    */
 }
